@@ -145,11 +145,12 @@ freeproc(struct proc *p)
   p->sz = 0;
   p->pid = 0;
   p->parent = 0;
-  p->name[0] = 0;
+  p->name[0] = 0; 
   p->chan = 0;
   p->killed = 0;
   p->xstate = 0;
   p->state = UNUSED;
+  p->trace_mask=0;
 }
 
 // Create a user page table for a given process,
@@ -282,6 +283,9 @@ fork(void)
 
   // Cause fork to return 0 in the child.
   np->trapframe->a0 = 0;
+
+  // copy trace_mask in the child
+  np->trace_mask=p->trace_mask;
 
   // increment reference counts on open file descriptors.
   for(i = 0; i < NOFILE; i++)
@@ -692,4 +696,18 @@ procdump(void)
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
   }
+}
+
+uint64 
+get_nproc(){
+  struct proc *p;
+  uint64 cnt=0;
+  for(p = proc; p < &proc[NPROC]; p++) {
+    acquire(&p->lock);
+    if(p->state != UNUSED) {
+      cnt++;
+    } 
+    release(&p->lock);
+  }
+  return cnt;
 }
