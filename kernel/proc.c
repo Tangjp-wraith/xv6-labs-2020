@@ -18,6 +18,7 @@ struct spinlock pid_lock;
 extern void forkret(void);
 static void wakeup1(struct proc *chan);
 static void freeproc(struct proc *p);
+static void proc_freewalk(pagetable_t pagetable);
 
 extern char trampoline[]; // trampoline.S
 
@@ -121,6 +122,24 @@ found:
     return 0;
   }
 
+  // An empty kernel page table
+  p->kpagetable=kkvminit();
+  if(p->kpagetable==0){
+    freeproc(p);
+    release(&p->lock);
+    return 0;
+  }
+
+  // each process's kernel page table 
+  // has a mapping for that process's kernel stack
+  char *pa=kalloc();
+  if(pa==0){
+    panic("kalloc");
+  }
+  uint64 va=KSTACK((int) (p-proc));
+  kkvmmap(p->kpagetable,va,(uint64)pa,PGSIZE,PTE_R|PTE_W);
+  p->kstack=va;
+
   // Set up new context to start executing at forkret,
   // which returns to user space.
   memset(&p->context, 0, sizeof(p->context));
@@ -150,6 +169,38 @@ freeproc(struct proc *p)
   p->killed = 0;
   p->xstate = 0;
   p->state = UNUSED;
+  // delete kstack
+  if(p->kstack){
+    pte_t* pte=walk(p->kpagetable,p->kstack,0);
+    if(pte==0){
+      panic("freeproc: walk");
+    }
+    kfree((void*)PTE2PA(*pte));
+  }
+  p->kstack=0;
+  //delete kernel pagetable 
+  if(p->kpagetable){
+    proc_freewalk(p->kpagetable);
+  }
+  p->kpagetable=0;
+}
+
+// Free a process's kernel page table
+static void
+proc_freewalk(pagetable_t pagetable){
+  // there are 2^9 = 512 PTEs in a page table.
+  for(int i = 0; i < 512; i++){
+    pte_t pte = pagetable[i];
+    if(pte & PTE_V){
+      pagetable[i] = 0;
+      if((pte & (PTE_R|PTE_W|PTE_X)) == 0){
+        // this PTE points to a lower-level page table.
+        uint64 child = PTE2PA(pte);
+        proc_freewalk((pagetable_t)child);
+      } 
+    }
+  }
+  kfree((void*)pagetable);
 }
 
 // Create a user page table for a given process,
@@ -473,6 +524,11 @@ scheduler(void)
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
+
+        // 将当前进程的kernel page存入stap寄存器中
+        w_satp(MAKE_SATP(p->kpagetable));
+        sfence_vma();
+
         swtch(&c->context, &p->context);
 
         // Process is done running for now.
@@ -486,6 +542,8 @@ scheduler(void)
 #if !defined (LAB_FS)
     if(found == 0) {
       intr_on();
+      // 没有进程在运行则使用内核原来的kernel pagtable
+      kvminithart();
       asm volatile("wfi");
     }
 #else
